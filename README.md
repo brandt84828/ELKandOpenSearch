@@ -399,5 +399,303 @@ PUT movies
 * 當dynamic被設置成false的時候，存在新增字段的數據寫入，該數據可以被索引，但是新增字段被丟棄
 * 當設置成strict模式的時候，數據寫入直接出錯
 
+### 定義Mapping
+自定義Mapping的一些建議
+* 可以參考API手冊，純手寫
+* 為了減少工作量及減低出錯機率，可以依照以下步驟
+    * 創建一個臨時的index，寫入一些樣本數據
+    * 透過訪問Mapping API獲得該臨時文件的Dynamic Mapping定義
+    * 修改後使用，使用該配置創建索引
+    * 刪除臨時索引
+
+控制當前字段是否被索引
+* Index : 控制當前字段是否被索引。默認為true，如果設置成false，該自斷不可被搜尋
+```
+PUT users
+{
+    "mappings": {
+        "firstName": {
+            "type": "text"
+        },
+        "lastName": {
+            "type": "text",
+            "index": false
+        }
+    }
+}
+```
+
+Index Options
+* 四種不同級別的Index Options配置，可以控制倒排索引記錄的內容
+    * docs : 記錄doc id
+    * freqs : 記錄doc id和term frequencies
+    * positions : 記錄doc id / term frequencies / term position
+    * offsets : 記錄doc id / term frequencies / term position / character offects
+* Text類型默認記錄positions，其他默認為docs
+* 記錄內容越多，占用儲存空間越大
+
+null_value
+```
+GET users/_search?q=mobile:NULL
+
+PUT users
+{
+    "mappings": {
+        "properties": {
+            "mobile": {
+                "type": "keyword",
+                "null_value": "NULL"
+            }
+        }
+    }
+}
+```
+* 需要對Null值實現搜尋
+* 只有Keyword類型支持設定Null_Value
+
+copy_to
+```
+GET users/_search?q=fullName:(F A)
+
+PUT users
+{
+    "mappings": {
+        "firstName": {
+            "type": "text"
+            "copy_to": "fullName"
+        },
+        "lastName": {
+            "type": "text",
+            "copy_to": "fullName"
+        }
+    }
+}
+```
+* _all在7中被copy_to所替代
+* 滿足一些特定的搜尋需求
+* copy_to將字段的數值拷貝到目標字段，實現類似_all的作用
+* copy_to的目標字段不出現在_source中
+
+數組類型
+* Elasticsearch中部提供專門的數組類型，但是任何字段都可以包含多個相同類型的數值
+```
+PUT users/_doc/1
+{
+    "name": "twobirds",
+    "interests": ["reading", "music"]
+}
+```
+
+多字段類型
+* 多字段特性
+    * 廠商名字實現精確匹配
+        * 增加一個keyword字段
+    * 使用不同的analyzer
+        * 不同語言
+        * 拼音字段的搜尋
+        * 支持為搜尋和索引指定不同的analyzer
+
+Exact Values v.s. Full Text
+* Exact Value: 包括數字/日期/具體的一個字符串
+    * Elasticsearch中的keyword
+    * 在索引時，不需要做特殊的分詞處理
+* Full Text: 非結構化的文本數據
+    * Elasticsearch中的text
+
+自定義分詞
+* 當Elasticsearch自帶的分詞器無法滿足時，可以自定義分詞器，透過組合不同的組件實現
+    * Character Filter
+    * Tokenizer
+    * Token Filter
+
+Character Filters
+* 在Tokenizer之前對文本進行處理，例如增加刪除及替換字符。可以配置多個Character Filters。會影響Tokenizer的position和offset資訊
+* 一些自帶的Character Filters
+    * HTML strip - 去除html標籤
+    * Mapping - 字符串替換
+    * Pattern replace - 正則匹配替換
+Tokenizer
+* 將原始的文本按照一定的規則切分為詞(term or token)
+* Elasticsearch內置的Tokenizers
+    * whitespace / standard / uax_url_email / pattern / keyword / path hierarchy
+* 可以用Java開發插件，自訂Tokenizer
+Token Filters
+* 將Tokenizer輸出的單詞(term)，進行增加/修改/刪除
+* 自帶的Token Filters
+    * Lowercase / stop / synonym
+
+### Index Template
+* Index Templates - 幫助設定Mappings和Settings，並按照一定的規則，自動匹配到新創建的索引上
+    * 模板僅在一個索引被新創建時才會產生作用，修改模板不會影響到已創建的索引
+    * 可以設定多個索引模板，這些設定會被"merge"在一起
+    * 可以指定"order"的數值，控制"merging"的過程
+
+Index Template的工作方式
+* 當一個索引被新建立時
+    * 應用Elasticsearch默認的settings和mappings
+    * 應用order數值低的Index Template的設定
+    * 應用order數值高的Index Template的設定，之前的設定會被覆蓋
+    * 應用創建索引時，用戶所指定的Settings和Mappings，並覆蓋之前模板中的設定
+
+### Dynamic Template
+* 根據Elasticsearch識別的數據類型，結合字段名稱來動態設定字段類型
+    * 所有的字符串類型都設定成Keyword，或者關閉keyword字段
+    * is開頭的字頭都設置成boolean
+    * long_開頭的都設置成long類型
+
+```
+PUT my_test_index
+{
+    "mappings": {
+        "dynamic_templates": [
+            {
+                "full_name": {
+                    "path_match": "name.*",
+                    "path_unmatch": "*.middle",
+                    "mapping": {
+                        "type": "text",
+                        "copy_to": "full_name"
+                    }
+                }
+            }
+        ]
+    }
+}
+```
+* Dynamic Template是定義在某個索引的Mapping中
+* Template有一個名稱
+* 匹配規則是一個數組
+* 為匹配到字段設置Mapping
+
+## Search(搜尋)
+### Aggregation(聚合)
+* Elasticsearch除搜尋以外，提供針對ES數據進行統計分析的功能
+    * 實時性高
+    * Hadoop(T+1)
+* 透過聚合會得到一個數據的概覽，是分析和總結全套的數據，而不是尋找單個文檔
+    * XX和XX的客房數量
+    * 不同的價格區間，可預訂的一般型/五星級的數量
+* 高性能，只需要一條語句就能夠從Elasticsearch得到分析結果
+    * 無需在客戶端自己去實現分析邏輯
+
+集合的分類
+* Bucket Aggregation - 一些列滿足特定條件的文檔的集合
+* Metric Aggregation - 一些數學運算，可以對文檔字段進行統計分析
+* Pipeline Aggregation - 對其他聚合結果進行二次聚合
+* Matrix Aggregation - 支持對多個字段的操作並提供一個結果矩陣
+
+Metric
+* Metric會基於數據集計算結果，除了支持在字段上進行計算，同樣也支持在腳本(painless script)產生的結果之上進行計算
+* 大多數Metric是數學計算，僅輸出一個值
+    * min / max / sum / avg / cardinality
+* 部分metric支持輸出多個數值
+    * stats / percentiles / percentile_ranks
+
+### 基於Term的查詢
+* Term的重要性
+    * Term是表達語意的最小單位。搜尋和利用統計語言模型進行自然語言處理都需要處理Term
+* 特色
+    * Term Level Query: Term Query / Range Query / Exists Query / Prefix Query / Wildcard Query
+    * 在ES中，Term查詢，對輸入不做分詞。會將輸入作為一個整體，在倒排索引中查找準確的詞項，並且使用相關度評分公式為每個包含該詞項的文檔進行相關度評分，例如"Apple Store"
+    * 可以透過Constant Score將查詢轉換成一個Filtering，避免評分，並利用緩存提高性能
+
+複合查詢 - Constant Score轉為Filter
+* 將Query轉成Filter，忽略TF-IDF計算，避免相關性評分的開銷
+* Filter可以有效利用緩存
+
+### 基於全文的查詢
+* 基於全文本的查找
+    * Match Query / Match Phrase Query / Query String Query
+* 特色
+    * 索引和搜尋時都會進行分詞，查詢字符串先傳遞到一個合適的分詞器，然後生成一個供查詢的詞項列表
+    * 查詢時，會先對輸入的查詢進行分詞，然後每個詞項逐個進行底層的查詢，最終將結果進行合併，並為每個文檔生成一個評分。例如查"Matrix reloaded"，會查到包括Matrix或者reload的所有結果
+
+### 結構化搜尋
+* 結構化數據 & 結構化搜尋
+    * 如果不需要算分，可以透過Constant Score，將查詢轉為Filtering
+* 範圍查詢和Date Math
+* 使用Exist查詢處理非空Null值
+* 精確值 & 多值字段的精確值查找
+    * Term查詢是包含，不是完全相等。針對多值字段查詢需要注意
+
+### 相關性和相關性評分
+* 相關性 - Relevance
+    * 搜尋的相關性算分，描述了一個文檔和查詢語句匹配的程度。ES會對每個匹配查詢條件的結果進行算分_score
+    * 評分的本質是排序，需要把最符合用戶需求的文檔排在前面。ES5之前，默認的相關性評分採用TF-IDF，現在採用BM25
+
+詞頻TF
+* Term Frequency: 檢索在一篇文檔 中出現的頻率
+    * 檢索詞出現的次數除以文檔的總字數
+* 度量一條查詢和結果文檔相關性的簡單方法: 簡單將搜尋中每一個詞的TF進行相加
+    * TF(區塊鏈) + TF(的) + TF(應用)
+* Stop Word
+    * "的"在文檔中出現了很多次，但是對貢獻相關度幾乎沒有用處，不應該考慮他們的TF
+
+逆文檔頻率IDF
+* DF: 檢索詞在所有文檔中出現的頻率
+    * "區塊鏈"在相對比較少的文檔中出現
+    * "應用"在相對比較多的文檔中出現
+    * "Stop Word"在大量的文檔中出現
+* Inverse Document Frequency: 簡單說=log(全部文檔數/檢索詞出現過的文檔總數)
+* TF-IDF本質上就是將TF加總變成加權後加總
+    * TF(區塊鏈)*IDF(區塊鏈) + TF(的)*IDF(的) + TF(應用)*IDF(應用)
+
+Boosting Relevance
+* Boosting是控制相關度的一種手段
+    * 索引、字段或查詢子條件
+* 參數boost的含意
+    * boost > 1, 評分的相關度相對性提升
+    * 0 < boost < 1, 打分的權重相對性降低
+    * boost < 0, 貢獻負分
+
+### Query Context & Filter Context
+* 高級搜尋的功能: 支持多項文本輸入，針對多個字段進行搜尋
+* 搜尋引擎一般也提供基於時間/價格等條件過濾
+* 在Elasticsearch中，有Query和Filter兩種不同的Context
+    * Query Context: 相關性評分
+    * Filter Context: 不需要算分(Yes or No)，可以利用Cache，獲得更好的性能
+
+bool查詢
+* 一個bool查詢，是一個或者多個查詢子句的組合
+    * 總共包括4種子句，其中2種會影響評分，2種不影響評分
+* 相關性並不只是全文本檢索的專利，也適用於yes|no的子句，匹配的子句越多，相關性評分越高。如果多條查詢子句被合併為一條複合查詢語句，比如bool查詢，則每個查詢子句計算得出的評分會被合併到總的相關性評分中
+
+|  |   |
+| ---- | ---- |
+|  must  | 必須匹配，貢獻評分 |
+| should | 選擇性匹配，貢獻評分 |
+| must_not | Filter Context 查詢子句，必須不能匹配 |
+| filter | Filter Context 必須匹配，但是不貢獻評分 |
+
+bool查詢語法
+```
+POST /products/_search
+{
+  "query": {
+    "bool" : {
+      "must" : {
+        "term" : { "price" : "30" }
+      },
+      "filter": {
+        "term" : { "avaliable" : "true" }
+      },
+      "must_not" : {
+        "range" : {
+          "price" : { "lte" : 10 }
+        }
+      },
+      "should" : [
+        { "term" : { "productID.keyword" : "JODL-X-1937-#pV7" } },
+        { "term" : { "productID.keyword" : "XHDK-A-1293-#fJ3" } }
+      ],
+      "minimum_should_match" :1
+    }
+  }
+}
+```
+* 子查詢可以任意順序出現
+* 可以嵌套多個查詢
+* 如果你的bool查詢中，沒有must條件，should中必須至少滿足一條查詢
+
 ## Reference
 [極客時間](https://time.geekbang.org/course/detail/100030501-102655)
