@@ -655,7 +655,7 @@ Boosting Relevance
     * Query Context: 相關性評分
     * Filter Context: 不需要算分(Yes or No)，可以利用Cache，獲得更好的性能
 
-bool查詢
+#### bool查詢
 * 一個bool查詢，是一個或者多個查詢子句的組合
     * 總共包括4種子句，其中2種會影響評分，2種不影響評分
 * 相關性並不只是全文本檢索的專利，也適用於yes|no的子句，匹配的子句越多，相關性評分越高。如果多條查詢子句被合併為一條複合查詢語句，比如bool查詢，則每個查詢子句計算得出的評分會被合併到總的相關性評分中
@@ -696,6 +696,98 @@ POST /products/_search
 * 子查詢可以任意順序出現
 * 可以嵌套多個查詢
 * 如果你的bool查詢中，沒有must條件，should中必須至少滿足一條查詢
+
+#### 單字符串多字段查詢
+```
+
+PUT /blogs/_doc/1
+{
+    "title": "Quick brown rabbits",
+    "body":  "Brown rabbits are commonly seen."
+}
+
+PUT /blogs/_doc/2
+{
+    "title": "Keeping pets healthy",
+    "body":  "My quick brown fox eats rabbits on a regular basis."
+}
+
+POST /blogs/_search
+{
+    "query": {
+        "bool": {
+            "should": [
+                { "match": { "title": "Brown fox" }},
+                { "match": { "body":  "Brown fox" }}
+            ]
+        }
+    }
+}
+
+POST blogs/_search
+{
+    "query": {
+        "dis_max": {
+            "queries": [
+                { "match": { "title": "Quick pets" }},
+                { "match": { "body":  "Quick pets" }}
+            ]
+        }
+    }
+}
+
+
+POST blogs/_search
+{
+    "query": {
+        "dis_max": {
+            "queries": [
+                { "match": { "title": "Quick pets" }},
+                { "match": { "body":  "Quick pets" }}
+            ],
+            "tie_breaker": 0.2
+        }
+    }
+}
+```
+* 評分過程
+    * 查詢should語句中的兩個查詢
+    * 加總兩個查詢的評分
+    * 乘以匹配語句的總數
+    * 除以所有語句的總數
+
+引入Dis Max Query => 返回字段當中評分最高的作為整體的評分
+
+可以引入tie_breaker，Tie Breaker是一個介於0-1之間的浮點數。0代表使用最佳匹配，1代表所有語句同等重要。
+*   獲取最佳匹配語句的評分_score
+*   將其他匹配語句評分與tie_breaker相乘
+*   對以上評分求和並規範化
+
+
+Multi Match(三種場景)
+* 最佳字段(Best Fields)
+    * 當字段之間相互競爭，又相互關聯。例如title和body這樣的字段。評分來自最佳匹配字段
+* 多數字段(Most Fields)
+    * 處理英文內容時，一種常見的手段是，在主字段(English Analyzer)，抽取詞幹，加入同義詞，以匹配更多的文檔。相同的文本，加入子字段(Standard Analyzer)，以提供更加精確的匹配。其他字段作為匹配文檔提高相關度的信號，匹配字段越多則越好
+* 混合字段(Cross Field)
+    * 對於某些實體，例如人名、地址、圖書資訊，需要在多個字段中確定資訊，單個字段只能作為整體的一部分，希望在任何這些列出的字段中找到盡可能多的詞
+Multi Match Query
+```
+POST blogs/_search
+{
+  "query": {
+    "multi_match": {
+      "type": "best_fields",
+      "query": "Quick pets",
+      "fields": ["title","body"],
+      "tie_breaker": 0.2,
+      "minimum_should_match": "20%"
+    }
+  }
+}
+```
+* Best Fields是默認類型，可以不用指定
+* Minimum should match等參數可以傳遞到生成的query中
 
 ## Reference
 [極客時間](https://time.geekbang.org/course/detail/100030501-102655)
