@@ -789,5 +789,265 @@ POST blogs/_search
 * Best Fields是默認類型，可以不用指定
 * Minimum should match等參數可以傳遞到生成的query中
 
+跨字段搜尋
+```
+{
+    "street": "1",
+    "city": "2",
+    "country": "3",
+    postcode: "4"
+}
+POST address/_search
+{
+    "query": {
+        "multi_match": {
+            "query": "1",
+            "type": "most_fields",
+            // "operator": "and",
+            "fields": ["street", "city", "country", "postcode"]
+        }
+    }
+}
+```
+* 無法使用Operator
+* 可以用copy_to解決，但需要額外的存儲空間
+
+### 自然語言與查詢Recall
+* 當處理人類自然語言時，有些情況，儘管搜尋和原本不完全匹配，但是希望搜到一些內容
+* 一些可採取的優化
+    * 規一化: 清除變音符號
+    * 抽取詞根: 清除單複數和時態的差異
+    * 包含同義詞
+    * 拼寫錯誤: 拼寫錯誤或者同音異形詞
+
+#### 混合多語言的挑戰
+* 一些具體的多語言場景
+    * 不同的索引使用不同的語言 / 同一個索引中，不同的字段使用不同的語言 / 一個文檔的一個字段內混合不同的語言
+* 混合語言存在的一些挑戰
+    * 詞幹提取: 以色列文檔包含了希伯來語、阿拉伯語、俄語和英語
+    * 不正確的詞檔頻率: 以英文為主的文章中，德文算分高(稀有)
+    * 需要判斷用戶搜尋時使用的語言，語言識別(Compact Language Detector)
+        * 例如根據語言查詢不同的索引
+
+#### 分詞的挑戰
+* 英文分詞: You're分成一個還是多個? Half-baked
+* 中文分詞
+    * 分詞標準: 實際情況須制訂不同的標準
+    * 歧義 (組合型歧義、交集型歧義、真歧義)
+
+### Search Template - 解耦程序 & 搜尋DSL
+```
+POST _scripts/tmdb
+{
+  "script": {
+    "lang": "mustache",
+    "source": {
+      "_source": [
+        "title","overview"
+      ],
+      "size": 20,
+      "query": {
+        "multi_match": {
+          "query": "{{q}}",
+          "fields": ["title","overview"]
+        }
+      }
+    }
+  }
+}
+```
+* Elasticsearch的查詢語句
+    * 對相關性評分 / 查詢性能都至關重要
+    * 在開發初期，雖然可以明確定義查詢餐數，但是往往還不能定義最終查詢的DSL具體結構
+        * 透過Search Template定義一個Contract
+    * 各司其職(解耦)
+        * 開發人員 / 搜尋工程師 / 性能工程師
+
+### Index Alias 實現零停機維運
+```
+PUT movies-2019/_doc/1
+{
+  "name":"the matrix",
+  "rating":5
+}
+
+PUT movies-2019/_doc/2
+{
+  "name":"Speed",
+  "rating":3
+}
+
+POST _aliases
+{
+  "actions": [
+    {
+      "add": {
+        "index": "movies-2019",
+        "alias": "movies-latest"
+      }
+    }
+  ]
+}
+
+POST movies-latest/_search
+{
+  "query": {
+    "match_all": {}
+  }
+}
+
+POST _aliases
+{
+  "actions": [
+    {
+      "add": {
+        "index": "movies-2019",
+        "alias": "movies-lastest-highrate",
+        "filter": {
+          "range": {
+            "rating": {
+              "gte": 4
+            }
+          }
+        }
+      }
+    }
+  ]
+}
+
+POST movies-lastest-highrate/_search
+{
+  "query": {
+    "match_all": {}
+  }
+}
+```
+
+### 評分與排序
+* Elasticsearch默認會以文檔的相關度評分進行排序
+* 可以透過指定一個或者多個字段進行排序
+* 使用相關度評分(score)排序，不能滿足某些特定條件
+    * 無法針對相關度，對排序實現更多的控制
+
+#### Function Score Query
+* Function Score Query
+    * 可以在查詢結束時，對每一個匹配的文檔進行一系列的重新算分，根據新生成的分數進行排序
+* 提供了幾種默認的計算分值得函數
+    * Weight: 為每一個文檔設置一個簡單而不被規範化的權重
+    * Field Value Factor: 使用該數值來修改_score，例如將熱度和點讚數作為評分的參考因素
+    * Random Score: 為每一個用戶使用一個不同(隨機的)評分結果
+    * 衰減函數: 以某個字段的值為標準，距離某個值越近，得分越高
+    * Script Scroe: 自定義腳本完全控制所需邏輯
+
+##### Boost Mode & Max Boost
+* Boost Mode
+    * Multiply: 評分與函數值得乘積
+    * Sum: 評分和函數的和
+    * Min / Max: 評分與函數取最小/最大值
+    * Replace: 使用函數值取代評分
+* Max Boost可以將算分控制在一個最大值
+
+### Term & Phrase Suggester
+#### Elasticsearch Suggester API
+* 搜尋引擎中類似的功能在Elasticsearch中是透過Suggester API實現的
+* 原理: 將輸入的文本分解為Token，然後在索引的字典裡查找相似的Term並返回
+* 根據不同的使用場景，Elasticsearch設計了4種類別的Suggesters
+    * Term & Phrase Suggester
+    * Complete & Context Suggester
+
+#### Term Suggester
+```
+POST /articles/_search
+{
+  "size": 1,
+  "query": {
+    "match": {
+      "body": "lucen rock"
+    }
+  },
+  "suggest": {
+    "term-suggestion": {
+      "text": "lucen rock",
+      "term": {
+        "suggest_mode": "missing",
+        "field": "body"
+      }
+    }
+  }
+}
+```
+* Suggester就是一種特殊類型的搜尋。"text"裡是調用時候提供的文本，通常來自於用戶介面上用戶輸入的內容
+* 用戶輸入的"lucen"是一個錯誤的拼寫
+* 會到指定的字段"body"上搜尋，當無法搜尋到結果時(missing)，返回建議的詞
+
+#### Phrase Suggester
+```
+POST /articles/_search
+{
+  "suggest": {
+    "my-suggestion": {
+      "text": "lucne and elasticsear rock hello world ",
+      "phrase": {
+        "field": "body",
+        "max_errors":2,
+        "confidence":0,
+        "direct_generator":[{
+          "field":"body",
+          "suggest_mode":"always"
+        }],
+        "highlight": {
+          "pre_tag": "<em>",
+          "post_tag": "</em>"
+        }
+      }
+    }
+  }
+}
+```
+* Phrase Suggester在Term Suggester上增加了一些額外的邏輯
+* 一些參數
+    * Suggest Mode: missing, popular, always
+    * Max Errors: 最多可以拼錯的Terms數
+    * Confidence: 限制返回結果數，默認為1
+
+### Auto Complete
+#### The Completion Suggester
+* Completion Suggester提供了自動完成(Auto Complete)的功能。用戶每輸入一個字符就需要及時發送一個查詢請求到後端查找匹配項
+* 對性能要求比較苛刻。Elasticsearch採用了不同的數據結構，並非透過倒排索引來完成，而是將Analyze的數據編碼成FST和索引一起存放。FST會被ES整個加載進記憶體，速度很快
+* FST只能用於前綴查找
+
+#### 使用Completion Suggester的一些步驟
+```
+PUT articles
+{
+  "mappings": {
+    "properties": {
+      "title_completion":{
+        "type": "completion"
+      }
+    }
+  }
+}
+```
+* 定義Mapping，使用"completion" type
+* 索引數據
+* 運行"suggest"查詢，得到搜尋建議
+
+#### Context Suggester
+* Completion Suggester的擴展
+* 可以在搜尋中加入更多的上下文資訊，例如，輸入"star"
+    * 咖啡相關: 建議"Starbucks"
+    * 電影相關: "star wars"
+
+#### 實現Context Suggester
+* 可以定義兩種類型的Context
+    * Category - 任意的字符串
+    * Geo - 地理位置資訊
+* 實現Context Suggester的具體步驟
+    * 訂製一個Mapping
+    * 索引數據，並且為每個文檔加入Context資訊
+    * 結合Context進行Suggestion查詢
+
+
 ## Reference
 [極客時間](https://time.geekbang.org/course/detail/100030501-102655)
