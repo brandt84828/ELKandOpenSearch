@@ -1048,6 +1048,80 @@ PUT articles
     * 索引數據，並且為每個文檔加入Context資訊
     * 結合Context進行Suggestion查詢
 
+### 精準度和召回率
+* 精準度
+    * Completion > Phrase > Term
+* 召回率
+    * Term > Phrase > Completion
+* 性能
+    * Completion > Phrase > Term
 
+## 配置跨集群搜尋
+* 單集群 - 當水平擴展時，節點數不能無限增加
+    * 當集群的meta資訊(節點、索引和集群狀態)過多，會導致更新壓力變大，單個Active Master會成為性能瓶頸，導致整個集群無法正常工作
+* 早期版本，透過Tribe Node可以實現多集群訪問的需求，但還是存在一定的問題
+    * Tribe Node會以Client Node的方式加入每個集群。集群中Master節點的任務變更需要Tribe Node的回應才能繼續
+    * Tribe Node不保存Cluster State資訊，一旦重啟，初始化很慢
+    * 當多個集群存在索引重名的情況時，只能設置一種Prefer規則
+
+### 跨集群搜尋
+* 早期Tribe Node的方案存在一定的問題，現已被Deprecated
+* Elasticsearch5.3引入了跨集群搜尋的功能(Cross Cluster Search)
+    * 允許任何節點扮演federated節點，以輕量的方式，將搜尋請求進行代理
+    * 不需要以Client Node的形式加入其他集群
+```
+//在每個集群上設置
+PUT _cluster/settings
+{
+  "persistent": {
+    "cluster": {
+      "remote": {
+        "cluster0": {
+          "seeds": [
+            "127.0.0.1:9300"
+          ],
+          "transport.ping_schedule": "30s"
+        },
+        "cluster1": {
+          "seeds": [
+            "127.0.0.1:9301"
+          ],
+          "transport.compress": true,
+          "skip_unavailable": true
+        },
+        "cluster2": {
+          "seeds": [
+            "127.0.0.1:9302"
+          ]
+        }
+      }
+    }
+  }
+}
+
+#cURL
+curl -XPUT "http://localhost:9200/_cluster/settings" -H 'Content-Type: application/json' -d'
+{"persistent":{"cluster":{"remote":{"cluster0":{"seeds":["127.0.0.1:9300"],"transport.ping_schedule":"30s"},"cluster1":{"seeds":["127.0.0.1:9301"],"transport.compress":true,"skip_unavailable":true},"cluster2":{"seeds":["127.0.0.1:9302"]}}}}}'
+
+curl -XPUT "http://localhost:9201/_cluster/settings" -H 'Content-Type: application/json' -d'
+{"persistent":{"cluster":{"remote":{"cluster0":{"seeds":["127.0.0.1:9300"],"transport.ping_schedule":"30s"},"cluster1":{"seeds":["127.0.0.1:9301"],"transport.compress":true,"skip_unavailable":true},"cluster2":{"seeds":["127.0.0.1:9302"]}}}}}'
+
+curl -XPUT "http://localhost:9202/_cluster/settings" -H 'Content-Type: application/json' -d'
+{"persistent":{"cluster":{"remote":{"cluster0":{"seeds":["127.0.0.1:9300"],"transport.ping_schedule":"30s"},"cluster1":{"seeds":["127.0.0.1:9301"],"transport.compress":true,"skip_unavailable":true},"cluster2":{"seeds":["127.0.0.1:9302"]}}}}}'
+
+
+#查詢
+GET /users,cluster1:users,cluster2:users/_search
+{
+  "query": {
+    "range": {
+      "age": {
+        "gte": 20,
+        "lte": 40
+      }
+    }
+  }
+}
+```
 ## Reference
 [極客時間](https://time.geekbang.org/course/detail/100030501-102655)
