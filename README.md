@@ -239,7 +239,7 @@ Index是Document的容器，是一個Document的結合，Indexing則是指保存
     * 不同的集群透過不同的名字來區分，可透過配置文件或者命令修改
     * 一個集群可以有一個或著多個節點
 
-## 節點
+### 節點
 * 節點是一個Elasticsearch的實例
     * 本質上就是一個Java進程
     * 一台機器上可以運行多個Elasticsearch進程，但是生產環境一班建議一台機器上只運行一個Elasticsearch實例
@@ -251,15 +251,35 @@ Master-eligible nodes 和 Master Node
     * 可以設置node.master: false禁止
 * Master-eligible節點可以參加選主流程，成為Master Node
 * 當第一個節點啟動時，它會將自己選舉為Master Node
+* 互相ping對方，Node ID低的會成為被選舉的節點
+* 其他節點會加入集群但是不承擔Master Node的角色。一旦發現被選中的主節點丟失，就會選舉出新的Master節點
 * 每個節點上都保存了集群的狀態，只有Master Node才能修改集群的狀態資訊
     * 集群狀態(Cluster State)，維護了一個集群中必要的資訊
         * 所有的節點資訊
         * 所有的索引和其相關的Mapping與Setting資訊
         * 分片的路由資訊
     * 任意節點都能修改資訊會導致數據的不一致性
+    * 處理創建、刪除索引等請求 / 決定分片被分配到哪個節點 / 負責索引的創建與刪除
+    * 維護並且更新Cluster State
+    * Master Node非常重要，在部屬上需要考慮解決單點的問題
+    * 為一個集群設置多個Master節點 / 每個節點只承擔Master的單一角色
+* Split-Brain問題，分布式系統的經典網路問題，當網路出現問題，一個節點和其他節點無法連接(假設3個Node，Node1網路斷)
+    * Node2和Node3會重新選舉Master
+    * Node1自己還是作為Master，組成一個集群，同時更新Cluster State
+    * 導致2個Master維護不同的cluster state。當網路恢復時，無法選擇正確的恢復
+* 如何避免Split-Brain
+    * 限定一個選舉條件，設置quorum(仲裁)，只有在Master eligible節點數大於quorum時，才能進行選舉
+        * Quorum = (master total node / 2) + 1
+        * 當3個master eligible時，設置discovery.zen.minium_master_nodes為2，即可避免Split-Brain
+    * 從7.0開始無須這個配置
+        * 移除minimum_master_nodes參數，讓Elasticsearch自己選擇可以形成仲裁的節點
+        * 典型的主節點選舉現在只需要很短的時間就可以完成。集群的伸縮變得更安全、更容易並且可能造成丟失數據的系統配置選項更少
+        * 節點更清楚記錄他們的狀態，有助於診斷為什麼他們不能加入集群或為什麼無法選舉出主節點
 
 * Data Node
-    * 可以保存數據的節點叫做Data Node。負責保存分片數據，在數據擴展上起到了重要的作用
+    * 可以保存數據的節點叫做Data Node。負責保存分片數據，在數據擴展上起到了重要的作用(由Master Node決定如何把分片分配到Data Node上)
+    * 透過增加Data Node可以解決水平擴展和數據單點的問題
+    * 節點啟動後，預設就是Data Node，可以設定node.data: false禁止
 * Coordinating Node
     * 負責接受Client的請求，將請求分發到合適的節點，最終把結果匯集到一起
     * 每個節點默認都起到了Coordinating Node的職責
@@ -270,22 +290,29 @@ Master-eligible nodes 和 Master Node
 * Tribe Node
     * (5.3開始使用Cross Cluster Search) Tribe Node連接到不同的Elasticsearch集群，並且支持將這些集群當成一個單獨的集群處理
 
-## 分片 (Primary Shard & Replica Shard)
+### 分片 (Primary Shard & Replica Shard)
 * Primary Shard : 用以解決數據水平擴展的問題。透過主分片可以將數據分布到集群內的所有Node之上
     * 一個分片是一個運行的Lucene的實例
     * 主分片數在索引創建時指定，後續不允許修改，除非Reindex
 * Replica : 用以解決數據高可用的問題。分片是主分片的拷貝
     * 副本分片數可以動態調整
     * 增加副本數可以在一定程度上提高服務的可用性(讀取的吞吐)
+    * 數據可用性: 透過引入Replica Shard提高數據的可用性。一旦主分片丟失，副本可以Promote成主分片。每個節點上都有完整備份的數據。如果不設置副本，一旦出現結點硬體故障，就有可能造成數據丟失
 
 分片的設定
 * 對於生產環境中分片的設定需要提前做好容量規劃
-    * 分片數設置過小
+    * 主分片數設置過小
         * 導致後續無法增加節點實現水平擴展
         * 單個分片的數據量太大，導致數據重分配耗時
-    * 分片數設置過大，(7.0開始默認主分片設置成1，解決了over-sharding的問題)
+    * 主分片數設置過大，(7.0開始默認主分片設置成1，解決了over-sharding的問題)
         * 影響搜索結果的相關性評分，影響統計結果的準確性
         * 單個節點上過多的分片會導致資源浪費，同時也會影響性能
+    * 副本分片數設置過多，會降低集群整體的寫入效能
+* 故障轉移
+    * 3個節點共同組成。包含了1個索引、索引設置了3個Primary Shard和1個Replica
+    * 節點1是Master節點，節點意外出現故障。集群重新選舉Master節點
+    * Node3上的R0提升成P0，集群變黃
+    * R0和R1重新分配，集群變綠
 
 集群的健康狀況
 * GET _cluster/health
@@ -293,6 +320,61 @@ Master-eligible nodes 和 Master Node
 * Yellow : 主分片全部正常分配，有副本分片未能正常分配
 * Red : 有主分片未能分配
     * 例如當Server Disk容量超過85%時，去創建一個新的索引
+
+### 當Document儲存在Shard上
+* Document會儲存在具體的某個主分片和副本分片上: 例如Document1，會儲存在P0和R0分片上
+* Document到分片的映射算法
+    * 確保Document能均勻分布在所用分片上，充分利用硬體資源，避免部分機器空閒，部分機器繁忙
+    * 潛在的算法
+        * 隨機 / Round Robin。當查詢Document1，分片數很多需要多次查詢才可能查到
+        * 維護Document到分片的映射關係，當Document數據量大的時候，維護成本高
+        * 實時計算，透過Document1自動算出需要去哪個分片獲取
+
+#### Document到分片的路由算法
+* shard = hash(_routing) % number_of_primary_shards
+    * Hash算法確保Document均勻分散到分片中
+    * 默認的_routing值是Document id
+    * 可以自行制定routing數值，例如用相同國家的商品，都分配到指定的shard
+    * 設定Index Settings後，Primary數不能修改的根本原因
+
+### 分片及其生命週期
+#### 倒排索引不可變性
+* 倒排索引採用Immutable Design，一旦生成不可更改
+* 不可變性，帶來的好處:
+    * 無需考慮併發寫文件的問題，避免了鎖機制帶來的性能問題
+    * 一旦讀入cpu的文件系統緩存便留在那。只又文件系統存有足夠的空間，大部分請求就會直接請求快取，提升了很大的效能
+    * 緩存容易生成和維護 / 數據可以被壓縮
+* 不可變性帶來的挑戰: 如果需要讓一個新的Document可以被搜尋，需要重建整個索引。
+
+#### Lucene Index
+* 在Lucene中，單個倒排索引文件被稱為Segment。Segment是自包含且不可變更的。多個Segments彙總再一起稱為Lucene的Index，其對應的就是ES中的Shard
+* 當有新Document寫入時，會生成新的Segment，查詢時會同時查詢所有Segments，並且對結果彙總。Lucene中有一個文件，用來記錄所有Segments訊息，叫做Commit Point
+* 刪除的文檔資訊，保存在.del文件中
+
+#### Refresh
+* 將Index buffer寫入Segment的過程叫Refresh。Refresh不執行fsync操作
+* Refresh頻率: 默認1秒發生一次，可透過index.refresh_internal配置。Refresh後，數據就可以被搜索到了。這也是為什麼Elasticsearch被稱為近實時搜索
+* 如果系統有大量的數據寫入，那就會產生很多的Segment
+* Index Buffer被占滿時，會觸發Refresh，默認值是JVM的10%
+
+#### Transaction Log
+* Segment寫入硬碟的過程相對耗時，借助文件系統緩存，Refresh時先將Segment寫入緩存以開放查詢
+* 為了保證數據不會丟失，所以在Index文檔時，同時寫Transaction Log，高版本開始，Transaction默認寫入。每個分片有一個Transaction Log
+* 在ES Refresh時，Index Buffer被清空，Transaction log不會清空
+
+#### Flush
+* ES Flush & Lucene Commit
+    * 調用Refresh，Index Buffer清空並且Refresh
+    * 定用fsync，將緩存中的Segments寫入硬碟
+    * 清空(刪除)Transaction Log
+    * 默認30分鐘調用一次
+    * Transaction Log滿(默認為512MB)
+
+#### Merge
+* Segment很多，需要定期被合併
+    * 減少Segments / 刪除已經刪除的Document
+* ES和Lucene會自動進行Merge操作
+    * POST my_index/_forcemerge
 
 ## Analysis 與 Analyzer
 * Analysis : 文本分析是把全文本轉換成一系列單詞(term/token)的過程，也叫分詞
@@ -1125,3 +1207,5 @@ GET /users,cluster1:users,cluster2:users/_search
 ```
 ## Reference
 [極客時間](https://time.geekbang.org/course/detail/100030501-102655)
+
+[Cerebro](https://github.com/lmenezes/cerebro)
