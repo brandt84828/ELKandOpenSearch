@@ -1205,6 +1205,116 @@ GET /users,cluster1:users,cluster2:users/_search
   }
 }
 ```
+
+## 剖析分布式查詢及相關性評分
+
+### Query階段
+* 使用者發出搜索請求到ES節點，節點收到請求後，會以Coordinating節點的身分，在6個主副分片中隨機選擇3個分片發送查詢請求
+* 被選中的分片執行查詢進行排序，然後每個分片都會返回From+Size個排序後的Document ID和排序值給Coordinating節點
+
+### Fetch階段
+* Coordinating Node會將Query階段，從每個分片獲取的排序後Document ID列表重新進行排序，選取From到From+Size個Document ID
+* 以multi get請求的方式，到相應的分片獲取詳細的Document數據。
+
+### Query Then Fetch潛在的問題
+* 性能問題
+    * 每個分片上需要查的Documeny數量 = from + size
+    * 最終協調節點需要處理: number_of_shard * (from + size)
+    * 深度分頁
+* 相關性評分
+    * 每個分片都基於自己的分片上的數據進行相關度計算，這會導致評分偏離，特別是數據量很少時。相關性評分在分片之間是相互獨立，當Document總數很少的情況下，如果主分片大於1，主分片數越多，相關性評分會越不準
+
+### 解決評分不準的方法
+* 當數據量不大的時候，將主分片數設置為 1
+* 當數據量夠多時，只要保證文件均勻分佈在各個分片上, 結果一班就不會出現偏差
+
+* 使用DFS Query Then Fetch
+    * 在搜尋的URL 中指定參數_search?search_type=dfs_query_then_fetch
+    * 到每個分片把各分片的詞頻和文檔頻率進行蒐集, 然後完整的進行一次相關性算分，耗費更加多的CPU和記憶體，執行性能低下，一般不建議使用.
+```
+DELETE message
+
+PUT message
+{
+  "settings": {
+    "number_of_shards": 20
+  }
+}
+
+POST message/_bulk
+{"create":{}}
+{"content": "good"}
+{"create":{}}
+{"content": "good morning"}
+{"create":{}}
+{"content": "good morning everyone"}
+
+// 此時評分是有問題的，所有Document的評分都是0.2876821
+POST message/_search
+{
+  "query": {
+    "term": {
+      "content": {
+        "value": "good"
+      }
+    }
+  }
+  //,"explain": true
+}
+
+
+// 使用 DFS Query Then Fetch正確獲得評分 
+// 這種方式的性能不好，通常較少使用
+POST message/_search?search_type=dfs_query_then_fetch
+{
+  "query": {
+    "term": {
+      "content": {
+        "value": "good"
+      }
+    }
+  }
+}
+```
+
+## 排序及Doc Values & Fielddata
+
+### 排序
+* ES預設採用相關性算分對結果進行降序排序
+* 可透過設定sort參數自行設定排序，若不指定_score，則算分為null
+
+### 排序的過程
+* 排序是針對字段原始內容進行的，倒排索引無法發揮作用
+* 需要用到正排索引，透過文檔Id和字段快速得到字段原始內容
+* ES有兩種實作方式
+    * Fielddata : 預設是關閉的, 可透過修改Mapping 中欄位的fielddata: true來開啟，但必須了解這邊儲存的是分詞後的結果，若這不是想要的效果，那可以為該text欄位加一個keyword子欄位，然後直接使用該子欄位
+    ```
+    {
+    "properties": {
+            "屬性": {
+                "type": "text",            // 以text類型為例
+                "fielddata": true        // keyword 類型的默認開啟, 因此無需特別設置
+            }
+        }
+    }
+    ```
+
+    * Doc Values (列式儲存，對Text類型無效)
+        * 列式儲存，對text類型無效
+        * 預設是開啟的，可透過修改Mapping 中欄位的doc_values: false來關閉
+        * 重新打開需要重建索引
+        * 關閉Doc Values 的好處:1.增加索引的速度 2.減少磁碟空間
+        * 什麼情況要關閉:當明確不需要該欄位參與排序及聚合分析時
+
+### Doc Values vs Field Data
+|  | Doc Values | Field Data |
+| :----: | :----: | :----: |
+| 何時建立 | 索引時和倒排索引一起創建 | 搜索時動態創建 |
+| 建立位置 | 硬碟文件 | JVM Heap |
+| 優點 | 避免大量占用記憶體 | 索引速度快，不占用額外的硬碟空間 |
+| 缺點 | 降低索引速度，占用額外硬碟空間 | 文檔過多時，動態創建開銷大，占用過多JVM Heap |
+| 默認值 | ES 2.x之後 | ES 1.x及之前 |
+
 ## Reference
 [極客時間](https://time.geekbang.org/course/detail/100030501-102655)
 
